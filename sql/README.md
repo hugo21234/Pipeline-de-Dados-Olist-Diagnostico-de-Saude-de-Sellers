@@ -40,13 +40,27 @@ seller_ops_mart.bronze.olist_orders_dataset
 seller_ops_mart.bronze.olist_sellers_dataset
 ```
 
-## Próximos passos (silver e mart)
+## SQL — Camada Silver
 
-Esta pasta cobre apenas bronze. As próximas camadas, ainda a criar:
+A pasta `sql/silver/` contém o DDL da camada **silver** do `SELLER_OPS_MART`:
+dado limpo, renomeado para PT-BR e padronizado a partir da bronze, ainda no
+grão original de cada entidade (não é o modelo estrela final — isso fica
+para a camada mart).
 
-- `sql/silver/` — tabelas limpas e padronizadas (`orders`, `order_items`,
-  `reviews`, `sellers`, `products`), com tipos corrigidos (ex.: CEPs como
-  `STRING`) e nomes de coluna corrigidos (ex.: `product_name_length`).
+| Ordem | Arquivo | Tabela | Fonte (bronze) | Transformação principal |
+|---|---|---|---|---|
+| 00 | `silver/00_criar_schema_silver.sql` | schema `silver` | — | cria o schema |
+| 01 | `silver/01_itens_pedidos.sql` | `Itens_Pedidos` | `olist_order_items_dataset` | renomeação de colunas para PT-BR |
+| 02 | `silver/02_olist_orders.sql` | `Olist_orders` | `olist_orders_dataset` | renomeação de colunas para PT-BR |
+| 03 | `silver/03_geolocalizacao.sql` | `geolocalizacao` | `olist_geolocation_dataset` | padronização do nome do município via `CASE` (centenas de variações de grafia/acento) |
+| 04 | `silver/04_olist_cliente.sql` | `OLIST_Cliente` | `olist_customers_dataset` | desnormalização do grão para `customer_unique_id` (1 linha por cliente, via `GROUP BY` + `ANY_VALUE`) |
+
+Caminho lógico completo: `seller_ops_mart.silver.<nome_da_tabela>`.
+
+## Próximos passos (mart)
+
+Esta pasta cobre bronze e silver. A próxima camada, ainda a criar:
+
 - `sql/mart/` — `F_SELLER_ORDERS`, `F_SELLER_REVIEWS`, `DIM_SELLER`,
   `DIM_SELLER_LOCATION`, `DIM_PRODUCT`, `DIM_PRODUCT_CATEGORY`, `DIM_TIME` e
   o agregado `AGG_SELLER_HEALTH`, conforme desenhado no [README principal](../README.md)
