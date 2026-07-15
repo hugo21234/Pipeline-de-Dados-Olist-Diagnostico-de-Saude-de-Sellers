@@ -1,4 +1,16 @@
-# SELLER_OPS_MART — Snowflake Schema em cima do Olist
+# Pipeline de Dados Olist — Diagnóstico de Saúde de Sellers
+
+Este projeto constrói um data mart em Snowflake Schema a partir do dataset público da Olist, focado em diagnóstico de saúde de sellers. A modelagem foi orientada por perguntas reais de operação: quem fatura mais/menos, quais sellers combinam atraso com notas ruins e quais cidades concentram mais sellers e maior faturamento.
+
+Ao longo do desenvolvimento, utilizei assistência de IA como ferramenta de apoio em engenharia de dados: identificação de deduplicações e anomalias, revisão de integridade entre camadas (Bronze → Silver → Data Mart) e suporte na definição de métricas de negócio. A IA foi usada para aumentar produtividade e agilizar processos de ingestão e modelagem, mas todas as decisões de design, regras de negócio e SQL foram revisadas e implementadas manualmente.
+
+---
+
+## Dashboard — Visão Geral
+
+![Dashboard Preview](assets/dashboard_preview.jpg)
+
+---
 
 ## Visão geral
 
@@ -10,7 +22,7 @@ O objetivo não é modelar "todo" o data warehouse da Olist, mas criar um recort
 
 ## Problema de negócio
 
-A Olist depende da performance dos sellers para manter a experiência do cliente. Alguns vendedores atrasam entregas, concentram reclamações e derrubam a nota média da plataforma. [web:58][web:62]
+A Olist depende da performance dos sellers para manter a experiência do cliente. Alguns vendedores atrasam entregas, concentram reclamações e derrubam a nota média da plataforma.
 
 Este mart responde às perguntas:
 
@@ -18,25 +30,25 @@ Este mart responde às perguntas:
 - Em quais regiões esses sellers estão concentrados?
 - Quais categorias de produto estão mais associadas a atraso e baixa satisfação?
 
-O consumidor direto desse mart é o time de **Seller Operations** (operações e qualidade), que precisa decidir quem treinar, monitorar ou eventualmente desligar. [web:56][web:101]
+O consumidor direto desse mart é o time de **Seller Operations** (operações e qualidade), que precisa decidir quem treinar, monitorar ou eventualmente desligar.
 
 ---
 
 ## Dataset de origem
 
-Fonte principal: **Brazilian E-Commerce Public Dataset by Olist (Kaggle)**. [web:55][web:45]
+Fonte principal: **Brazilian E-Commerce Public Dataset by Olist (Kaggle)**.
 
 Tabelas relevantes do warehouse lógico:
 
-- `orders` — status, datas de compra, aprovação, envio e entrega [web:55][web:53]
-- `order_items` — itens por pedido, `seller_id`, preço, frete [web:55]
-- `order_reviews` — notas (1–5) e comentários [web:55]
-- `order_payments` — forma de pagamento, parcelas [web:55]
-- `sellers` — localização do seller (cidade, estado) [web:55][web:57]
-- `customers` — localização do cliente [web:55]
-- `products` — categoria, dimensões [web:55][web:107]
-- `product_category_translation` — tradução de categorias [web:55]
-- `geolocation` — CEP, latitude, longitude [web:55][web:57]
+- `orders` — status, datas de compra, aprovação, envio e entrega
+- `order_items` — itens por pedido, `seller_id`, preço, frete
+- `order_reviews` — notas (1–5) e comentários
+- `order_payments` — forma de pagamento, parcelas
+- `sellers` — localização do seller (cidade, estado)
+- `customers` — localização do cliente
+- `products` — categoria, dimensões
+- `product_category_translation` — tradução de categorias
+- `geolocation` — CEP, latitude, longitude
 
 Esse mart assume que essas tabelas já existem na camada silver/gold do warehouse principal.
 
@@ -117,7 +129,7 @@ Colunas principais:
 - `seller_state`.
 - `seller_region` — derivado de estado (ex.: Sudeste, Sul, Nordeste).
 
-Hierarquia: **região → estado → cidade**. [web:109][web:108]
+Hierarquia: **região → estado → cidade**.
 
 ---
 
@@ -137,7 +149,7 @@ Hierarquia: **região → estado → cidade**. [web:109][web:108]
 - `product_category_name_english` (EN).
 - `category_group` — agrupamento de categorias em grupos maiores (ex.: eletro, moda, lar).
 
-Hierarquia: **grupo → categoria**. [web:108][web:109]
+Hierarquia: **grupo → categoria**.
 
 ---
 
@@ -172,7 +184,7 @@ Essas métricas podem ser materializadas em uma tabela agregada `AGG_SELLER_HEAL
 
 ## Data product — contrato de dados
 
-Este data mart é tratado como um **data product de Seller Operations**. [web:101][web:105]
+Este data mart é tratado como um **data product de Seller Operations**.
 
 ### 1. Schema estável
 
@@ -199,19 +211,19 @@ Falhas nessas regras devem ser reportadas em um log de qualidade.
 
 ### 4. Consumidores
 
-- Dashboards de operações (monitoramento de sellers). [web:56]
+- Dashboards de operações (monitoramento de sellers).
 - Análises ad‑hoc de times de dados.
-- Modelos preditivos de risco de seller. [web:63][web:67]
+- Modelos preditivos de risco de seller.
 
 ---
 
 ## Integração com medallion e warehouse
 
-Este mart se apoia em uma arquitetura medallion já existente: [web:97]
+Este mart se apoia em uma arquitetura medallion já existente:
 
-- **Bronze**: CSVs originais do Olist (dados crus). [web:55]
-- **Silver**: tabelas normalizadas e limpas (orders, items, reviews, sellers, etc.). [web:53][web:57]
-- **Gold**: data products como o **SELLER_OPS_MART**, cada um com seu próprio contrato. [web:101][web:105]
+- **Bronze**: CSVs originais do Olist (dados crus).
+- **Silver**: tabelas normalizadas e limpas (orders, items, reviews, sellers, etc.).
+- **Gold**: data products como o **SELLER_OPS_MART**, cada um com seu próprio contrato.
 
 O SELLER_OPS_MART consome dados da camada silver/gold do warehouse, mas tem suas próprias tabelas de fato e dimensão, desenhadas para o domínio de operations.
 
@@ -219,24 +231,24 @@ O SELLER_OPS_MART consome dados da camada silver/gold do warehouse, mas tem suas
 
 ## Diferença em relação a um star schema simples
 
-Um **star schema** colocaria localização e categoria diretamente em `DIM_SELLER` e `DIM_PRODUCT`, com menos normalização e sem subdimensões. [web:96][web:104][web:110]
+Um **star schema** colocaria localização e categoria diretamente em `DIM_SELLER` e `DIM_PRODUCT`, com menos normalização e sem subdimensões.
 
 Aqui, o **snowflake schema**:
 
 - Separa localização e categoria em subdimensões próprias.
-- Representa melhor hierarquias (região, grupo de categoria). [web:108][web:109][web:110]
-- Facilita reuso dessas dimensões em outros marts (ex.: logística, marketing). [web:104][web:111]
+- Representa melhor hierarquias (região, grupo de categoria).
+- Facilita reuso dessas dimensões em outros marts (ex.: logística, marketing).
 
-**Custo:** mais joins e consultas um pouco mais complexas. [web:104][web:110]  
-**Ganho:** modelo mais expressivo, mais fácil de evoluir e de manter consistência em múltiplos data marts. [web:90][web:102][web:109]
+**Custo:** mais joins e consultas um pouco mais complexas.  
+**Ganho:** modelo mais expressivo, mais fácil de evoluir e de manter consistência em múltiplos data marts.
 
 ---
 
 ## Como implementar (visão de alto nível)
 
-1. Criar as tabelas de `DIM_*` e `F_*` no warehouse (Snowflake, DuckDB, etc.). [web:90][web:96]
+1. Criar as tabelas de `DIM_*` e `F_*` no warehouse (Snowflake, DuckDB, etc.).
 2. Popular dimensões a partir das tabelas silver já existentes.
-3. Construir os fatos `F_SELLER_ORDERS` e `F_SELLER_REVIEWS` via joins das tabelas silver. [web:53]
+3. Construir os fatos `F_SELLER_ORDERS` e `F_SELLER_REVIEWS` via joins das tabelas silver.
 4. Implementar regras de qualidade e validar o contrato de dados.
 5. Construir agregações como `AGG_SELLER_HEALTH` para consumo rápido.
 
@@ -246,4 +258,4 @@ Aqui, o **snowflake schema**:
 
 Este README não é sobre "fazer mais tabelas".
 
-É sobre aprender a pensar em termos de **domínios de dados, contratos e modelos que resistem à mudança**, subindo do nível "tabelas soltas" para "data products". [web:101][web:105]
+É sobre aprender a pensar em termos de **domínios de dados, contratos e modelos que resistem à mudança**, subindo do nível "tabelas soltas" para "data products".
