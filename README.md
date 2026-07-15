@@ -16,7 +16,7 @@ Ao longo do desenvolvimento, utilizei assistência de IA como ferramenta de apoi
 
 Este projeto define e implementa um **data mart de operações de sellers** (SELLER_OPS_MART) em cima do dataset público da Olist.
 
-O objetivo não é modelar "todo" o data warehouse da Olist, mas criar um recorte específico que atenda ao time de operações e qualidade de sellers, usando **snowflake schema** para representar hierarquias de localização e categorias de produtos.
+O objetivo não é modelar "todo" o data warehouse da Olist, mas criar um recorte específico que atenda ao time de operações e qualidade de sellers, usando **Snowflake Schema** para representar hierarquias de localização e categorias de produtos.
 
 ---
 
@@ -27,10 +27,11 @@ A Olist depende da performance dos sellers para manter a experiência do cliente
 Este mart responde às perguntas:
 
 - Quais sellers são de alto risco para a plataforma?
-- Em quais regiões esses sellers estão concentrados?
-- Quais categorias de produto estão mais associadas a atraso e baixa satisfação?
+- Quais sellers combinam atraso com nota ruim simultaneamente?
+- Em quais cidades os sellers estão concentrados e qual o faturamento por cidade?
+- Quem fatura mais e quem fatura menos?
 
-O consumidor direto desse mart é o time de **Seller Operations** (operações e qualidade), que precisa decidir quem treinar, monitorar ou eventualmente desligar.
+O consumidor direto desse mart é o time de **Seller Operations**, que precisa decidir quem treinar, monitorar ou eventualmente desligar.
 
 ---
 
@@ -38,7 +39,7 @@ O consumidor direto desse mart é o time de **Seller Operations** (operações e
 
 Fonte principal: **Brazilian E-Commerce Public Dataset by Olist (Kaggle)**.
 
-Tabelas relevantes do warehouse lógico:
+Tabelas relevantes ingeridas na camada Bronze:
 
 - `orders` — status, datas de compra, aprovação, envio e entrega
 - `order_items` — itens por pedido, `seller_id`, preço, frete
@@ -50,212 +51,178 @@ Tabelas relevantes do warehouse lógico:
 - `product_category_translation` — tradução de categorias
 - `geolocation` — CEP, latitude, longitude
 
-Esse mart assume que essas tabelas já existem na camada silver/gold do warehouse principal.
+---
+
+## Arquitetura Medallion
+
+O projeto segue a arquitetura em três camadas:
+
+```
+Bronze (CSVs crus do Olist)
+    ↓
+Silver (tabelas normalizadas e limpas)
+    ↓
+Data Mart (SELLER_OPS_MART — fatos, dimensões e views)
+```
+
+- **Bronze**: ingestão bruta dos 9 CSVs do dataset Olist, sem transformações.
+- **Silver**: limpeza, padronização de nomes, deduíplicação e normalização de geolocalização.
+- **Data Mart**: modelagem dimensional orientada ao domínio de operações de sellers.
 
 ---
 
-## Escopo do data mart
+## Desafios enfrentados
 
-O **SELLER_OPS_MART** é definido por:
+### Desafio 1 — Geolocalização suja e redundante
 
-### Fatos centrais
+O dataset de geolocação da Olist contém múltiplas entradas para o mesmo CEP com variações de grafia (cidades em minúsculo, maiúsculo, com e sem acento). Sem tratamento, o join com sellers ficaria ambíguo e geraria fanout nas métricas.
 
-- `F_SELLER_ORDERS` — pedidos por seller, com métricas de atraso e valor.
-- `F_SELLER_REVIEWS` — avaliações de clientes agregadas por pedido e seller.
-
-### Dimensões em snowflake
-
-- `DIM_SELLER`
-  - `DIM_SELLER_LOCATION` (subdimensão)
-- `DIM_PRODUCT`
-  - `DIM_PRODUCT_CATEGORY` (subdimensão)
-- `DIM_TIME`
-
-O foco é operacional: métricas e dimensões suficientes para acompanhar saúde de seller ao longo do tempo e por região/categoria.
+**Solução implementada:** padronização de `cidade_padronizada` e `estado_padronizado` na camada Silver (`03_geolocalizacao.sql`), com agregação por `GROUP BY` para eliminar duplicatas antes de qualquer join.
 
 ---
 
-## Snowflake schema — desenho lógico
+### Desafio 2 — Modelo de geolocação acoplado
 
-### Fato: F_SELLER_ORDERS
+A versão inicial da `dim_seller` referenciava diretamente a tabela `sellers_geolacation` (nome incorreto, sem normalização). Isso criava acoplamento direto entre a dimensão de seller e a tabela de geolocação, impossibilitando reuso em outros marts.
 
-**Grão:** 1 linha por pedido entregue.
+**Solução implementada:** desmembramento em duas subdimensões:
+- `dim_localidade` — tabela mestre de combinações únicas `estado + cidade`
+- `dim_seller_geolocation` — liga cada prefixo de CEP à sua `localidade_id`
 
-Colunas principais:
-
-- `order_id` — identificador do pedido.
-- `seller_id` — chave do seller.
-- `product_id` — produto principal.
-- `customer_id` — cliente.
-- `time_id` — chave da dimensão de tempo.
-- `seller_location_id` — chave da subdimensão de localização.
-- `product_category_id` — chave da subdimensão de categoria.
-- `order_status` — status (apenas entregues neste mart).
-- `order_purchase_timestamp` — data/hora de compra.
-- `order_delivered_customer_date` — data/hora de entrega.
-- `order_estimated_delivery_date` — data estimada.
-- `dias_atraso` — diferença (entrega real − entrega estimada).
-- `atrasou` — booleano (dias_atraso > 0).
-- `valor_pedido` — preço + frete.
-
-### Fato: F_SELLER_REVIEWS
-
-**Grão:** 1 linha por review ligado a pedido e seller.
-
-Colunas principais:
-
-- `review_id`.
-- `order_id`.
-- `seller_id`.
-- `time_id` — data da criação da review.
-- `review_score` — nota (1–5).
-- `review_comment_title`.
-- `review_comment_message`.
+A `dim_seller` passou a referenciar `dim_seller_geolocation` via `geolocation_id`, criando a hierarquia: `dim_seller → dim_seller_geolocation → dim_localidade`.
 
 ---
 
-### Dimensão: DIM_SELLER
+### Desafio 3 — Métricas de risco não existiam no dataset
 
-- `seller_id`.
-- `seller_location_id` — FK para `DIM_SELLER_LOCATION`.
-- `seller_since` — data do primeiro pedido.
-- `seller_status` — ativo/inativo.
+O dataset não fornece diretamente um indicador de risco por seller. Era preciso derivar isso a partir de métricas brutas de pedidos e avaliações.
 
-### Subdimensão: DIM_SELLER_LOCATION
+**Solução implementada:** criação de um índice composto na `vw_analise_sellers_performance`:
 
-- `seller_location_id`.
-- `seller_zip_code_prefix`.
-- `seller_city`.
-- `seller_state`.
-- `seller_region` — derivado de estado (ex.: Sudeste, Sul, Nordeste).
+```
+índice_performance_ruim = (média_dias_atraso × 0.5) + ((5 − média_nota) × 2)
+```
 
-Hierarquia: **região → estado → cidade**.
+Quanto maior o índice, pior o seller. A view filtra apenas sellers com mínimo de 5 pedidos para evitar ruído estatístico.
 
 ---
 
-### Dimensão: DIM_PRODUCT
+### Desafio 4 — Integridade referencial entre fatos e dimensões
 
-- `product_id`.
-- `product_category_id` — FK para `DIM_PRODUCT_CATEGORY`.
-- `product_weight_g`.
-- `product_length_cm`.
-- `product_height_cm`.
-- `product_width_cm`.
+Sem constraints explicitadas, os joins entre `fact_pedidos`, `dim_seller` e as subdimensões de geolocação poderiam silenciosamente perder registros ou gerar duplicatas.
 
-### Subdimensão: DIM_PRODUCT_CATEGORY
-
-- `product_category_id`.
-- `product_category_name` (PT).
-- `product_category_name_english` (EN).
-- `category_group` — agrupamento de categorias em grupos maiores (ex.: eletro, moda, lar).
-
-Hierarquia: **grupo → categoria**.
+**Solução implementada:** definição explícita de PRIMARY KEY em `dim_seller_geolocation`, FOREIGN KEY de `dim_seller` para `dim_seller_geolocation`, e FOREIGN KEY de `fact_pedidos` para `dim_seller_geolocation` via `seller_location_id`.
 
 ---
 
-### Dimensão: DIM_TIME
+## O que foi implementado
 
-- `time_id`.
-- `date`.
-- `day_of_week`.
-- `month`.
-- `quarter`.
-- `year`.
+### Camada Bronze — Ingestão
 
-Usada por ambos os fatos para análises temporais.
+| Arquivo | Tabela |
+|--------|--------|
+| `00_criar_catalog_schema.sql` | Criação do catalog e schema |
+| `01_olist_customers_dataset.sql` | customers |
+| `02_olist_geolocation_dataset.sql` | geolocation |
+| `03_olist_order_items_dataset.sql` | order_items |
+| `04_olist_order_payments_dataset.sql` | order_payments |
+| `05_olist_order_reviews_dataset.sql` | order_reviews |
+| `06_olist_orders_dataset.sql` | orders |
+| `07_olist_products_dataset.sql` | products |
+| `08_olist_sellers_dataset.sql` | sellers |
+| `09_product_category_name_translation.sql` | category_translation |
 
----
+### Camada Silver — Transformação
 
-## Métricas principais do mart
+| Arquivo | Tabela |
+|--------|--------|
+| `00_criar_schema_silver.sql` | Criação do schema silver |
+| `01_itens_pedidos.sql` | itens_pedidos |
+| `02_olist_orders.sql` | olist_orders |
+| `03_geolocalizacao.sql` | geolocalizacao (padronizada) |
+| `04_olist_cliente.sql` | olist_cliente |
+| `05_olist_pagamentos.sql` | olist_pagamentos |
+| `06_olist_avaliacao.sql` | avalicao |
+| `07_vendedores.sql` | vendedores |
+| `08_olist_produto.sql` | olist_produto |
+| `09_categoria_produto_nome_traducao.sql` | categoria_produto_nome_traducao |
 
-A partir dos fatos e dimensões, este mart suporta métricas como:
+### Camada Data Mart — Modelagem Dimensional
 
-- `total_pedidos` — contagem de pedidos por seller.
-- `taxa_atraso` — % de pedidos atrasados por seller.
-- `atraso_medio_dias` — média de dias de atraso.
-- `nota_media` — média de `review_score`.
-- `pct_notas_baixas` — % de reviews com score ≤ 2.
-- `volume_por_categoria` — número de pedidos por `product_category_id`.
-- `volume_por_regiao` — número de pedidos por `seller_region`.
-
-Essas métricas podem ser materializadas em uma tabela agregada `AGG_SELLER_HEALTH` dentro do próprio mart.
-
----
-
-## Data product — contrato de dados
-
-Este data mart é tratado como um **data product de Seller Operations**.
-
-### 1. Schema estável
-
-- Fatos e dimensões com colunas documentadas.
-- Chaves primárias e estrangeiras definidas.
-- Tipos de dados consistentes (datas, numéricos, IDs).
-
-### 2. Qualidade mínima
-
-Regras de qualidade obrigatórias:
-
-- Nenhum registro em `F_SELLER_ORDERS` sem `seller_id` nem `time_id`.
-- Nenhum registro em `F_SELLER_ORDERS` com `order_status` diferente de *delivered*.
-- `review_score` sempre entre 1 e 5 quando presente.
-- `dias_atraso` calculado apenas para pedidos entregues.
-- `DIM_SELLER_LOCATION` sempre preenchida para sellers ativos.
-
-Falhas nessas regras devem ser reportadas em um log de qualidade.
-
-### 3. Frequência de atualização
-
-- Atualização diária ou semanal, dependendo da disponibilidade de dados.
-- Snapshot de métricas agregadas (`AGG_SELLER_HEALTH`) com carimbo de data.
-
-### 4. Consumidores
-
-- Dashboards de operações (monitoramento de sellers).
-- Análises ad‑hoc de times de dados.
-- Modelos preditivos de risco de seller.
+| Arquivo | O que faz |
+|--------|----------|
+| `01_dim_seller_not_null.sql` | Constraint NOT NULL em dim_seller |
+| `02_dim_seller_fk_geolocation.sql` | FK legacy (sellers_geolacation) |
+| `03_dim_seller_ctas.sql` | `dim_seller` — dimensão de sellers com FK para geolocation |
+| `04_sub_dim_categoria_pk_fk.sql` | PK/FK da subdimensão de categoria |
+| `05_dim_time_ctas.sql` | `dim_time` — dimensão de tempo |
+| `06_fact_pedidos_ctas.sql` | `fact_pedidos` — tabela fato de pedidos com métricas de atraso |
+| `07_audit_constraints.sql` | Auditoria de constraints do mart |
+| `08_fact_reviews_ctas.sql` | `fact_reviews` — tabela fato de avaliações |
+| `09_vw_analise_sellers_performance.sql` | View: índice de performance ruim por seller |
+| `10_dim_localidade_ctas.sql` | `dim_localidade` — tabela mestre de cidade + estado |
+| `11_dim_seller_geolocation_ctas.sql` | `dim_seller_geolocation` — CEP linkado à localidade |
+| `12_vw_performance_negativa_sellers.sql` | View: sellers com atraso e/ou nota ruim por pedido |
+| `13_vw_faturamento_por_cidade.sql` | View: faturamento total agregado por cidade |
+| `14_fk_fact_pedidos_seller_geolocation.sql` | FK de fact_pedidos para dim_seller_geolocation |
+| `15_pk_fk_dim_seller_geolocation.sql` | PK em dim_seller_geolocation + FK de dim_seller |
 
 ---
 
-## Integração com medallion e warehouse
+## Snowflake Schema — Hierarquia de dimensões
 
-Este mart se apoia em uma arquitetura medallion já existente:
+```
+fact_pedidos
+    ├── dim_seller
+    │       └── dim_seller_geolocation
+    │               └── dim_localidade (cidade + estado)
+    ├── dim_product
+    │       └── sub_dim_categoria
+    └── dim_time
 
-- **Bronze**: CSVs originais do Olist (dados crus).
-- **Silver**: tabelas normalizadas e limpas (orders, items, reviews, sellers, etc.).
-- **Gold**: data products como o **SELLER_OPS_MART**, cada um com seu próprio contrato.
-
-O SELLER_OPS_MART consome dados da camada silver/gold do warehouse, mas tem suas próprias tabelas de fato e dimensão, desenhadas para o domínio de operations.
-
----
-
-## Diferença em relação a um star schema simples
-
-Um **star schema** colocaria localização e categoria diretamente em `DIM_SELLER` e `DIM_PRODUCT`, com menos normalização e sem subdimensões.
-
-Aqui, o **snowflake schema**:
-
-- Separa localização e categoria em subdimensões próprias.
-- Representa melhor hierarquias (região, grupo de categoria).
-- Facilita reuso dessas dimensões em outros marts (ex.: logística, marketing).
-
-**Custo:** mais joins e consultas um pouco mais complexas.  
-**Ganho:** modelo mais expressivo, mais fácil de evoluir e de manter consistência em múltiplos data marts.
+fact_reviews
+    ├── fact_pedidos (via order_id)
+    └── dim_time
+```
 
 ---
 
-## Como implementar (visão de alto nível)
+## Views analíticas
 
-1. Criar as tabelas de `DIM_*` e `F_*` no warehouse (Snowflake, DuckDB, etc.).
-2. Popular dimensões a partir das tabelas silver já existentes.
-3. Construir os fatos `F_SELLER_ORDERS` e `F_SELLER_REVIEWS` via joins das tabelas silver.
-4. Implementar regras de qualidade e validar o contrato de dados.
-5. Construir agregações como `AGG_SELLER_HEALTH` para consumo rápido.
+### `vw_analise_sellers_performance`
+Combina métricas de atraso e avaliação por seller. Calcula o `indice_performance_ruim` como indicador composto de risco. Filtra sellers com menos de 5 pedidos.
+
+### `vw_performance_negativa_sellers`
+Classifica cada pedido como `CRÍTICO: Atraso + Nota Ruim`, `Pedido Atrasado`, `Nota Ruim` ou `OK`. Alimenta o painel de sellers problemáticos do dashboard.
+
+### `vw_faturamento_por_cidade`
+Agrega faturamento, ticket médio, total de pedidos e sellers por cidade. Percorre a hierarquia completa: `fact_pedidos → dim_seller → dim_seller_geolocation → dim_localidade`.
+
+---
+
+## Ordem de execução
+
+A ordem abaixo deve ser respeitada por dependência entre tabelas:
+
+```
+1. Bronze (00 → 09)
+2. Silver (00 → 09)
+3. Data Mart:
+   a. dim_time
+   b. sub_dim_categoria
+   c. dim_localidade
+   d. dim_seller_geolocation
+   e. dim_seller
+   f. fact_pedidos
+   g. fact_reviews
+   h. Constraints e FKs (07, 14, 15)
+   i. Views (09, 12, 13)
+```
 
 ---
 
 ## Mentalidade
 
-Este README não é sobre "fazer mais tabelas".
+Este projeto não é sobre "fazer mais tabelas".
 
-É sobre aprender a pensar em termos de **domínios de dados, contratos e modelos que resistem à mudança**, subindo do nível "tabelas soltas" para "data products".
+É sobre aprender a pensar em termos de **domínios de dados, contratos e modelos que resistem à mudança** — subindo do nível de tabelas soltas para data products com integridade referencial, hierarquias documentadas e perguntas de negócio respondidas de forma reproduzível.
